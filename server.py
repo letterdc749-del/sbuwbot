@@ -16,6 +16,11 @@ plugin_results = {}
 plugin_lock = threading.Lock()
 
 
+@app.route("/", methods=["GET", "HEAD"])
+def health():
+    return jsonify({"status": "ok"})
+
+
 def load_queue():
     if not os.path.exists(QUEUE_FILE):
         return []
