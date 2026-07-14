@@ -3,6 +3,8 @@ import json
 import os
 import uuid
 import threading
+import base64
+import requests
 
 app = Flask(__name__)
 QUEUE_FILE = "queue.json"
@@ -11,9 +13,56 @@ LUA_FILE = "NameStore.lua"
 SPAWNERS_FILE = "spawners_data.json"
 SECRET = os.getenv("SERVER_SECRET", "changeme123")
 
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITHUB_REPO = os.getenv("GITHUB_REPO", "letterdc749-del/sbuwbot")
+GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
+
 plugin_commands = {}
 plugin_results = {}
 plugin_lock = threading.Lock()
+
+
+def github_sync_file(path, local_path, commit_message):
+    """Commit a local file's current contents back to GitHub so it survives
+    the next redeploy (Render's disk is wiped and reset from git on every deploy)."""
+    if not GITHUB_TOKEN:
+        return
+    try:
+        with open(local_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{path}"
+        headers = {
+            "Authorization": f"token {GITHUB_TOKEN}",
+            "Accept": "application/vnd.github+json",
+        }
+
+        get_resp = requests.get(url, headers=headers, params={"ref": GITHUB_BRANCH})
+        sha = get_resp.json().get("sha") if get_resp.status_code == 200 else None
+
+        payload = {
+            "message": commit_message,
+            "content": base64.b64encode(content.encode("utf-8")).decode("utf-8"),
+            "branch": GITHUB_BRANCH,
+        }
+        if sha:
+            payload["sha"] = sha
+
+        put_resp = requests.put(url, headers=headers, json=payload, timeout=15)
+        if put_resp.status_code not in (200, 201):
+            print(f"[GitHub Sync] Failed to sync {path}: {put_resp.status_code} {put_resp.text}")
+        else:
+            print(f"[GitHub Sync] Synced {path} to GitHub")
+    except Exception as e:
+        print(f"[GitHub Sync] Error syncing {path}: {e}")
+
+
+def github_sync_async(path, local_path, commit_message):
+    threading.Thread(
+        target=github_sync_file,
+        args=(path, local_path, commit_message),
+        daemon=True,
+    ).start()
 
 
 @app.route("/", methods=["GET", "HEAD"])
@@ -123,6 +172,7 @@ def apply_to_data(entry):
 
     save_data(data)
     regenerate_lua(data)
+    github_sync_async(DATA_FILE, DATA_FILE, f"Update NameStore data ({t} for {uid})")
 
 
 # ---------------- SPAWNERS ----------------
@@ -160,6 +210,7 @@ def apply_spawner(entry):
         data.pop(tool, None)
 
     save_spawners(data)
+    github_sync_async(SPAWNERS_FILE, SPAWNERS_FILE, f"Update spawners data ({action} for {tool})")
 
 
 @app.route("/getspawners", methods=["GET"])
